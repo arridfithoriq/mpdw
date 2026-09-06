@@ -1,0 +1,183 @@
+---
+title: "Tugas Pertemuan 3-mpdw"
+author: "Thoriq Ar Ridfi"
+date: "2026-09-06"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+# Pendahuluan 
+
+Pada tugas ini dilakukan analisis regresi dengan peubah lag menggunakan
+dataset kualitas udara New Delhi.
+
+-   Variabel Dependen (Y): Air Quality Index (AQI)
+
+-   Variabel Independen ($X$): Konsentrasi PM2.5 (pm25)
+
+Metode regresi lag yang dibandingkan meliputi:
+
+-   Model Koyck
+
+-   Distributed Lag Model (DLM)
+
+-   Autoregressive Distributed Lag (ARDL)
+
+```{r}
+library(dLagM)
+library(forecast)
+library(lmtest)
+library(ggplot2)
+library(dplyr)
+library(readxl)
+
+data_raw <- read_xlsx("C:\\Users\\TUF GAMING\\Downloads\\bersih.xlsx")
+df <- data_raw %>%
+  select(AQI, pm25) %>%
+  na.omit()
+  
+  str(df)
+head(df)
+```
+
+# 1. Model Koyck
+
+```{r}
+model_koyck <- koyckDlm(x = df$pm25, y = df$AQI)
+summary(model_koyck)
+```
+
+# 2. Distributed Lag Model (DLM)
+
+```{r}
+finiteDLMauto(
+  formula = AQI ~ pm25,
+  data = data.frame(df),
+  q.min = 1,
+  q.max = 10,
+  model.type = "dlm",
+  error.type = "AIC",
+  trace = TRUE
+)
+
+model.dlm.opt <- dlm(x = df$pm25, y = df$AQI, q = 6)
+summary(model.dlm.opt)
+```
+
+# 3. Autoregressive Distributed Lag (ARDL)
+
+```{r}
+# 1. Pemodelan ARDL Awal (p = 1, q = 1)
+model.ardl <- ardlDlm(formula = AQI ~ pm25, data = data.frame(df), p = 1, q = 1)
+summary(model.ardl)
+
+# 2. Lag Optimum ARDL
+model.ardl.opt <- ardlBoundOrders(data = data.frame(df), ic = "AIC", formula = AQI ~ pm25)
+
+# Menarik kombinasi lag dengan AIC terkecil
+min_p <- c()
+for(i in 1:6){
+  min_p[i] <- min(model.ardl.opt$Stat.table[[i]])
+}
+q_opt <- which(min_p == min(min_p, na.rm = TRUE))
+p_opt <- which(model.ardl.opt$Stat.table[[q_opt]] == min(model.ardl.opt$Stat.table[[q_opt]], na.rm = TRUE))
+
+data.frame("Lag_Y_opt(q)" = q_opt, "Lag_X_opt(p)" = p_opt, "AIC" = model.ardl.opt$min.Stat)
+
+# 3. Model ARDL Optimum
+model.ardl.best <- ardlDlm(formula = AQI ~ pm25, data = data.frame(df), p = p_opt, q = q_opt)
+summary(model.ardl.best)
+```
+
+# 4. Evaluasi Diagnostik Sisaan
+
+```{r}
+# Mengambil sisaan (residuals) dari masing-masing model
+res_koyck <- residuals(model_koyck$model)
+res_dlm   <- residuals(model.dlm.opt$model)
+res_ardl  <- residuals(model.ardl.best$model)
+
+# A. Uji Autokorelasi (Durbin-Watson Test)
+cat("=== Uji Autokorelasi (Durbin-Watson) ===\n")
+dwtest(model_koyck$model)
+dwtest(model.dlm.opt$model)
+dwtest(model.ardl.best$model)
+
+# B. Uji Heteroskedastisitas (Breusch-Pagan Test)
+cat("=== Uji Heteroskedastisitas (Breusch-Pagan) ===\n")
+bptest(model_koyck$model)
+bptest(model.dlm.opt$model)
+bptest(model.ardl.best$model)
+
+# C. Uji Normalitas (Shapiro-Wilk Test)
+cat("=== Uji Normalitas Sisaan (Shapiro-Wilk) ===\n")
+shapiro.test(res_koyck)
+shapiro.test(res_dlm)
+shapiro.test(res_ardl)
+```
+
+# 5. Evaluasi Akurasi Peramalan (MAPE)
+
+```{r}
+calc_mape <- function(actual, fitted) {
+  n_fit <- length(fitted)
+  n_act <- length(actual)
+  act_adj <- actual[(n_act - n_fit + 1):n_act]
+  
+  mape <- mean(abs((act_adj - fitted) / act_adj), na.rm = TRUE) * 100
+  return(mape)
+}
+
+# Perhitungan nilai MAPE
+mape_koyck <- calc_mape(df$AQI, fitted(model_koyck$model))
+mape_dlm   <- calc_mape(df$AQI, fitted(model.dlm.opt$model))
+mape_ardl  <- calc_mape(df$AQI, fitted(model.ardl.best$model))
+
+tabel_mape <- data.frame(
+  Model = c("Koyck", "DLM Optimum", "ARDL Optimum"),
+  MAPE = c(mape_koyck, mape_dlm, mape_ardl)
+)
+
+tabel_mape
+```
+
+# 6. Visualisasi Grafik Perbandingan
+
+```{r}
+# 1. Bagi Data Menjadi Train & Test (5 Data Terakhir sebagai Test)
+n_total <- nrow(df)
+train <- df[1:(n_total - 5), ]
+test  <- df[(n_total - 4):n_total, ]
+
+# 2. Fit Ulang Model Menggunakan Data Train
+model_koyck_train <- koyckDlm(x = train$pm25, y = train$AQI)
+model_dlm_train   <- dlm(x = train$pm25, y = train$AQI, q = q_opt)
+model_ardl_train  <- ardlDlm(formula = AQI ~ pm25, data = data.frame(train), p = p_opt, q = q_opt)
+
+# 3. Lakukan Peramalan dengan dLagM::forecast secara Spesifik
+fore.koyck   <- dLagM::forecast(model_koyck_train, x = test$pm25, h = 5)
+fore.dlm.opt <- dLagM::forecast(model_dlm_train, x = test$pm25, h = 5)
+fore.ardl    <- dLagM::forecast(model_ardl_train, x = test$pm25, h = 5)
+
+# 4. Plot Visualisasi Perbandingan (Persis Asprak)
+par(mfrow = c(1, 1))
+
+# Penentuan Batas Sumbu Y
+y_all <- c(test$AQI, fore.koyck$forecasts, fore.dlm.opt$forecasts, fore.ardl$forecasts)
+y_min <- min(y_all, na.rm = TRUE) - 2
+y_max <- max(y_all, na.rm = TRUE) + 2
+
+plot(test$pm25, test$AQI, type = "b", col = "black", ylim = c(y_min, y_max), lwd = 2,
+     ylab = "Nilai Y (AQI)", xlab = "Nilai X (PM2.5)", main = "Perbandingan Model Peramalan")
+
+lines(test$pm25, fore.koyck$forecasts, col = "red", type = "b", pch = 16)
+lines(test$pm25, fore.dlm.opt$forecasts, col = "blue", type = "b", pch = 17)
+lines(test$pm25, fore.ardl$forecasts, col = "green", type = "b", pch = 18)
+
+legend("topleft", 
+       legend = c("Aktual", "Koyck", "DLM Optimum", "ARDL Optimum"),
+       col = c("black", "red", "blue", "green"), 
+       lty = 1, pch = c(1, 16, 17, 18), cex = 0.8, inset = 0.02)
+```
